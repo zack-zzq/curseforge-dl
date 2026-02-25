@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable
 
@@ -25,13 +26,16 @@ from tqdm import tqdm
 
 from curseforge_dl.api import CurseForgeAPI
 from curseforge_dl.models import (
+    AddonFile,
+    CurseAddon,
     CurseManifest,
     CurseManifestFile,
     SECTION_MOD,
+    SECTION_MODPACK,
     SECTION_RESOURCE_PACK,
     SECTION_SHADER_PACK,
 )
-from curseforge_dl.url import build_cdn_url
+from curseforge_dl.url import build_cdn_url, get_download_url
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +124,129 @@ class ModpackInstaller:
         logger.info("Resolved manifest saved to %s", manifest_out)
 
         return resolved_manifest
+
+    # ── Download modpack by slug ──────────────────────────────────
+
+    async def download_modpack_by_slug(
+        self,
+        slug: str,
+        output_dir: str | Path = ".",
+        game_version: str = "",
+    ) -> tuple[Path, CurseAddon, AddonFile]:
+        """
+        Look up a modpack by its slug and download the latest version zip.
+
+        Args:
+            slug: The modpack slug (e.g. ``"all-the-mods-10"``).
+            output_dir: Directory to save the zip file into.
+            game_version: Optional Minecraft version filter for file selection.
+
+        Returns:
+            A tuple of ``(zip_path, addon, file)`` where ``zip_path`` is the
+            local path to the downloaded zip, ``addon`` is the modpack metadata,
+            and ``file`` is the downloaded file metadata.
+
+        Raises:
+            ValueError: If the modpack or a suitable file cannot be found.
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Find the modpack by slug
+        addon = await self.api.get_mod_by_slug(slug, class_id=SECTION_MODPACK)
+        if addon is None:
+            raise ValueError(f"Modpack not found: '{slug}'")
+
+        logger.info("Found modpack: %s (ID=%d)", addon.name, addon.id)
+
+        # 2. Select the best (latest) file
+        latest_file = self._select_latest_file(addon, game_version)
+        if latest_file is None:
+            raise ValueError(
+                f"No downloadable file found for modpack '{addon.name}'"
+                + (f" (game version: {game_version})" if game_version else "")
+            )
+
+        logger.info(
+            "Latest file: %s (ID=%d, %s)",
+            latest_file.display_name or latest_file.file_name,
+            latest_file.id,
+            f"{latest_file.file_length / 1024 / 1024:.1f} MB"
+            if latest_file.file_length
+            else "size unknown",
+        )
+
+        # 3. Resolve download URL
+        download_url = get_download_url(latest_file)
+        if not download_url:
+            # Fallback via API endpoint
+            download_url = await self.api.get_mod_file_download_url(
+                addon.id, latest_file.id
+            )
+
+        # 4. Download the file
+        target = output_dir / latest_file.file_name
+        if target.exists():
+            logger.info("File already exists: %s", target)
+        else:
+            await self._download_file_with_progress(download_url, target)
+
+        return target, addon, latest_file
+
+    @staticmethod
+    def _select_latest_file(
+        addon: CurseAddon, game_version: str = ""
+    ) -> AddonFile | None:
+        """
+        Select the latest non-server-pack file from the addon's ``latestFiles``.
+
+        Optionally filters by ``game_version``. Files are sorted by date
+        descending to pick the most recent one.
+        """
+        candidates = [
+            f
+            for f in addon.latest_files
+            if not f.is_server_pack and f.file_name
+        ]
+        if game_version:
+            filtered = [
+                f for f in candidates if game_version in f.game_versions
+            ]
+            if filtered:
+                candidates = filtered
+
+        if not candidates:
+            return None
+
+        # Sort by file_date descending (most recent first)
+        candidates.sort(
+            key=lambda f: f.file_date or datetime.min, reverse=True
+        )
+        return candidates[0]
+
+    async def _download_file_with_progress(
+        self, url: str, target: Path
+    ) -> None:
+        """Download a single file with a tqdm progress bar showing bytes."""
+        async with httpx.AsyncClient(
+            timeout=self._download_timeout, follow_redirects=True
+        ) as client:
+            async with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length", 0))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                pbar = tqdm(
+                    total=total or None,
+                    desc=target.name,
+                    unit="B",
+                    unit_scale=True,
+                    unit_divisor=1024,
+                )
+                with open(target, "wb") as fp:
+                    async for chunk in resp.aiter_bytes(8192):
+                        fp.write(chunk)
+                        pbar.update(len(chunk))
+                pbar.close()
 
     # ── Step 1: Parse manifest ─────────────────────────────────────
 

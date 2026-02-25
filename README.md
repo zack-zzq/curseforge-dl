@@ -26,6 +26,15 @@ export CURSEFORGE_API_KEY="your-api-key"
 # Method 3: Pass directly via CLI
 curseforge-dl --api-key "your-api-key" install modpack.zip ./output
 
+# Fetch modpack info by slug
+curseforge-dl fetch all-the-mods-10
+
+# Download latest modpack zip by slug
+curseforge-dl download all-the-mods-10 --output-dir ./downloads
+
+# Download with Minecraft version filter
+curseforge-dl download all-the-mods-10 -g 1.21.1 -o ./downloads
+
 # Install a CurseForge modpack
 curseforge-dl install modpack.zip ./output
 
@@ -55,8 +64,19 @@ async def main():
         for mod in results:
             print(mod.name)
 
-        # Install a modpack
+        # Find a modpack by slug
+        modpack = await api.get_mod_by_slug("all-the-mods-10", class_id=4471)
+        if modpack:
+            print(f"{modpack.name} — {modpack.download_count:,} downloads")
+
+        # Download latest modpack zip by slug
         installer = ModpackInstaller(api)
+        zip_path, addon, file = await installer.download_modpack_by_slug(
+            "all-the-mods-10", output_dir="./downloads"
+        )
+        print(f"Downloaded {addon.name} to {zip_path}")
+
+        # Install a modpack from zip
         await installer.install("modpack.zip", "./output")
 
 asyncio.run(main())
@@ -82,6 +102,8 @@ print(f"Total mods: {len(manifest.files)}")   # 480
 
 ## Features
 
+- **Modpack fetch by slug**: Look up any modpack by its slug and view latest version info
+- **Modpack download by slug**: Download the latest modpack zip directly by slug
 - **Modpack installation**: Parse CurseForge modpack zips and download all mods
 - **Modpack info**: Parse modpack metadata (MC version, loader, mod list) without downloading
 - **Smart URL construction**: Falls back to CDN URL when API doesn't provide download links

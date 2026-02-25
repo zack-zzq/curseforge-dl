@@ -178,5 +178,97 @@ def modpack_info(zipfile: str, show_mods: bool) -> None:
         click.echo(f"\n  (Use --show-mods / -m to list all {len(manifest.files)} mods)")
 
 
+@main.command()
+@click.argument("slug")
+@click.option("--game-version", "-g", default="", help="Minecraft version filter.")
+@click.pass_context
+def fetch(ctx: click.Context, slug: str, game_version: str) -> None:
+    """Fetch and display modpack info by its slug (e.g. 'all-the-mods-10')."""
+    api_key = ctx.obj["api_key"]
+    if not api_key:
+        click.echo("Error: CurseForge API key required. Set CURSEFORGE_API_KEY or use --api-key.", err=True)
+        sys.exit(1)
+
+    async def run():
+        async with CurseForgeAPI(api_key=api_key) as api:
+            from curseforge_dl.models import SECTION_MODPACK
+
+            addon = await api.get_mod_by_slug(slug, class_id=SECTION_MODPACK)
+            if addon is None:
+                click.echo(f"Error: Modpack '{slug}' not found.", err=True)
+                sys.exit(1)
+
+            authors = ", ".join(a.name for a in addon.authors) if addon.authors else "Unknown"
+            click.echo("=" * 55)
+            click.echo(f"  Modpack:     {addon.name}")
+            click.echo(f"  ID:          {addon.id}")
+            click.echo(f"  Slug:        {addon.slug}")
+            click.echo(f"  Authors:     {authors}")
+            click.echo(f"  Summary:     {addon.summary}")
+            click.echo(f"  Downloads:   {addon.download_count:,}")
+            if addon.links and addon.links.website_url:
+                click.echo(f"  URL:         {addon.links.website_url}")
+            click.echo("=" * 55)
+
+            # Show latest files
+            installer = ModpackInstaller(api)
+            latest = installer._select_latest_file(addon, game_version)
+            if latest:
+                click.echo(f"\n  Latest file:")
+                click.echo(f"    Name:      {latest.display_name or latest.file_name}")
+                click.echo(f"    File:      {latest.file_name}")
+                click.echo(f"    File ID:   {latest.id}")
+                if latest.file_length:
+                    size_mb = latest.file_length / 1024 / 1024
+                    click.echo(f"    Size:      {size_mb:.1f} MB")
+                if latest.file_date:
+                    click.echo(f"    Date:      {latest.file_date.strftime('%Y-%m-%d %H:%M')}")
+                if latest.game_versions:
+                    click.echo(f"    Versions:  {', '.join(latest.game_versions)}")
+                release_types = {1: "Release", 2: "Beta", 3: "Alpha"}
+                click.echo(f"    Type:      {release_types.get(latest.release_type, 'Unknown')}")
+            else:
+                click.echo("\n  No downloadable files found.")
+
+            if len(addon.latest_files) > 1:
+                click.echo(f"\n  All latest files ({len(addon.latest_files)}):")
+                for f in addon.latest_files:
+                    server = " [server]" if f.is_server_pack else ""
+                    click.echo(f"    [{f.id}] {f.display_name or f.file_name}{server}")
+
+    asyncio.run(run())
+
+
+@main.command()
+@click.argument("slug")
+@click.option("--output-dir", "-o", default=".", type=click.Path(), help="Output directory (default: current dir).")
+@click.option("--game-version", "-g", default="", help="Minecraft version filter.")
+@click.pass_context
+def download(ctx: click.Context, slug: str, output_dir: str, game_version: str) -> None:
+    """Download the latest modpack zip by its slug (e.g. 'all-the-mods-10')."""
+    api_key = ctx.obj["api_key"]
+    if not api_key:
+        click.echo("Error: CurseForge API key required. Set CURSEFORGE_API_KEY or use --api-key.", err=True)
+        sys.exit(1)
+
+    async def run():
+        async with CurseForgeAPI(api_key=api_key) as api:
+            installer = ModpackInstaller(api)
+            try:
+                zip_path, addon, file_info = await installer.download_modpack_by_slug(
+                    slug, output_dir=output_dir, game_version=game_version
+                )
+                click.echo(f"\n✓ Downloaded '{addon.name}'")
+                click.echo(f"  File:   {file_info.display_name or file_info.file_name}")
+                click.echo(f"  Saved:  {zip_path}")
+                if file_info.file_length:
+                    click.echo(f"  Size:   {file_info.file_length / 1024 / 1024:.1f} MB")
+            except ValueError as e:
+                click.echo(f"Error: {e}", err=True)
+                sys.exit(1)
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     main()

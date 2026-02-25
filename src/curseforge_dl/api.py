@@ -106,6 +106,7 @@ class CurseForgeAPI:
         sort_order: str = "desc",
         page_size: int = 20,
         index: int = 0,
+        slug: str = "",
     ) -> list[CurseAddon]:
         """
         Search for mods/addons on CurseForge.
@@ -139,6 +140,8 @@ class CurseForgeAPI:
             params["gameVersion"] = game_version
         if category_id:
             params["categoryId"] = category_id
+        if slug:
+            params["slug"] = slug
 
         data = await self._get("/v1/mods/search", params=params)
         return [CurseAddon.model_validate(item) for item in data.get("data", [])]
@@ -147,6 +150,25 @@ class CurseForgeAPI:
         """Get a single mod/addon by its ID."""
         data = await self._get(f"/v1/mods/{mod_id}")
         return CurseAddon.model_validate(data["data"])
+
+    async def get_mod_by_slug(
+        self, slug: str, class_id: int = 6
+    ) -> Optional[CurseAddon]:
+        """
+        Find a mod/addon by its slug.
+
+        Uses the search API with the ``slug`` parameter and returns the first
+        exact match, or ``None`` if no match is found.
+
+        Args:
+            slug: The project slug (e.g. ``"all-the-mods-10"``).
+            class_id: Class ID to filter by (default 6=Mods, 4471=Modpacks).
+        """
+        results = await self.search_mods(slug=slug, class_id=class_id, page_size=5)
+        for addon in results:
+            if addon.slug == slug:
+                return addon
+        return None
 
     async def get_mod_file(self, mod_id: int, file_id: int) -> AddonFile:
         """Get a specific file for a mod."""
@@ -161,6 +183,22 @@ class CurseForgeAPI:
             f"/v1/mods/{mod_id}/files", params={"pageSize": page_size}
         )
         return [AddonFile.model_validate(item) for item in data.get("data", [])]
+
+    async def get_mod_file_download_url(self, mod_id: int, file_id: int) -> str:
+        """
+        Get the download URL for a specific file via the API.
+
+        Uses ``GET /v1/mods/{modId}/files/{fileId}/download-url``.
+        Falls back to CDN URL construction if the API returns no URL.
+        """
+        data = await self._get(f"/v1/mods/{mod_id}/files/{file_id}/download-url")
+        url = data.get("data", "")
+        if url:
+            return url
+        # Fallback: get file info and build CDN URL
+        addon_file = await self.get_mod_file(mod_id, file_id)
+        from curseforge_dl.url import build_cdn_url
+        return build_cdn_url(addon_file.id, addon_file.file_name)
 
     async def get_categories(self) -> list[AddonCategory]:
         """Get all categories for Minecraft."""
